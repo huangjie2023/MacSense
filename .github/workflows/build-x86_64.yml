@@ -1,0 +1,83 @@
+name: Build x86_64 (unofficial)
+
+# Unofficial Intel build of MacSense, produced from a personal fork.
+# Upstream only ships a Developer ID signed arm64 release.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-x86_64:
+    runs-on: macos-latest
+    env:
+      MACSENSE_ARCH: x86_64
+      CONFIGURATION: release
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          uname -m
+          swift --version
+          xcodebuild -version
+
+      - name: Build release app for x86_64
+        run: ./script/build_and_run.sh --build
+
+      - name: Verify architecture
+        run: |
+          BIN="dist/MacSense.app/Contents/MacOS/MacSense"
+          lipo -info "$BIN"
+          lipo -info "$BIN" | grep -q "x86_64" || { echo "not an x86_64 binary"; exit 1; }
+          codesign -dv --verbose=2 "$BIN" 2>&1 | head -20
+
+      - name: Package zip
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          mkdir -p out
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent dist/MacSense.app "out/MacSense-${VERSION}-x86_64.zip"
+          ( cd out && shasum -a 256 ./*.zip > "MacSense-${VERSION}-x86_64-SHA256SUMS.txt" )
+          ls -lh out
+
+      - name: Package dmg (best effort, needs PyPI)
+        continue-on-error: true
+        run: ./script/package_release.sh --from-app
+
+      - name: Collect dmg if produced
+        if: always()
+        run: |
+          mkdir -p out
+          cp dist/releases/*.dmg out/ 2>/dev/null || echo "no dmg produced"
+          ls -lh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacSense-x86_64
+          path: out/*
+          if-no-files-found: warn
+
+      - name: Publish release on fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          TAG="x86_64-v${VERSION}"
+          NOTES="$(cat <<EOF
+          Unofficial **x86_64 (Intel)** build of MacSense ${VERSION}, compiled from
+          [behruzinho/MacSense](https://github.com/behruzinho/MacSense) at commit ${GITHUB_SHA}.
+
+          - Requires macOS 14 or newer.
+          - Ad-hoc signed only (no Developer ID, not notarized). After unzipping, clear the
+            quarantine flag before launching: \`xattr -dr com.apple.quarantine /Applications/MacSense.app\`
+          - Not affiliated with the upstream author. MIT licensed.
+          EOF
+          )"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --title "MacSense ${VERSION} (x86_64, unofficial)" --notes "$NOTES"
+          fi
