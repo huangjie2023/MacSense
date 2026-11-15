@@ -1,7 +1,7 @@
 name: Build x86_64 (unofficial)
 
 # Unofficial Intel build of MacSense, produced from a personal fork.
-# Upstream only ships a Developer ID signed arm64 release.
+# Upstream only ships a Developer ID signed arm64 release, built with xcodebuild.
 
 on:
   workflow_dispatch:
@@ -35,24 +35,63 @@ jobs:
           lipo -info "$BIN" | grep -q "x86_64" || { echo "not an x86_64 binary"; exit 1; }
           codesign -dv --verbose=2 "$BIN" 2>&1 | head -20
 
+      # SwiftPM's native build system (`swift build`) generates a Bundle.module
+      # accessor that resolves Bundle.main.bundleURL/<Pkg>_<Target>.bundle — i.e.
+      # the .app ROOT, not Contents/Resources — then falls back to an absolute
+      # path from the build machine. Off-machine both miss and the app traps with
+      # "could not load resource bundle". xcodebuild (what upstream ships) emits a
+      # different accessor that looks in Bundle.main.resourceURL, so upstream's
+      # own DMG never hits this. A second copy at the .app root satisfies the
+      # accessor this build actually contains. Verify it, then re-sign.
+      - name: Fix SwiftPM resource bundle lookup
+        run: |
+          APP=dist/MacSense.app
+          SRC="$APP/Contents/Resources/MacSense_MacSenseCore.bundle"
+          test -d "$SRC" || { echo "resource bundle missing from Contents/Resources"; find "$APP" -maxdepth 3; exit 1; }
+          /usr/bin/ditto "$SRC" "$APP/MacSense_MacSenseCore.bundle"
+
+          cat > /tmp/bundleprobe.swift <<'EOF'
+          import Foundation
+          let path = Bundle.main.bundleURL
+              .appendingPathComponent("MacSense_MacSenseCore.bundle").path
+          let bundle = Bundle(path: path)
+          print("Bundle.main.bundleURL: \(Bundle.main.bundleURL.path)")
+          print("accessor lookupPath  : \(path)")
+          print("exists               : \(FileManager.default.fileExists(atPath: path))")
+          print("Bundle(path:)        : \(bundle?.bundleIdentifier ?? "nil")")
+          print("localizations        : \(bundle?.localizations.sorted() ?? [])")
+          exit(bundle != nil ? 0 : 1)
+          EOF
+          swiftc -O /tmp/bundleprobe.swift -o "$APP/Contents/MacOS/bundleprobe"
+          "$APP/Contents/MacOS/bundleprobe"
+          rm -f "$APP/Contents/MacOS/bundleprobe"
+
+          codesign --force --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+
       - name: Package zip
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
           mkdir -p out
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent dist/MacSense.app "out/MacSense-${VERSION}-x86_64.zip"
-          ( cd out && shasum -a 256 ./*.zip > "MacSense-${VERSION}-x86_64-SHA256SUMS.txt" )
           ls -lh out
 
       - name: Package dmg (best effort, needs PyPI)
         continue-on-error: true
         run: ./script/package_release.sh --from-app
 
-      - name: Collect dmg if produced
-        if: always()
+      - name: Collect dmg and write checksums
         run: |
-          mkdir -p out
+          VERSION="$(tr -d '[:space:]' < VERSION)"
           cp dist/releases/*.dmg out/ 2>/dev/null || echo "no dmg produced"
-          ls -lh out
+          cd out
+          if ls ./*.dmg >/dev/null 2>&1; then
+            shasum -a 256 ./*.zip ./*.dmg > "MacSense-${VERSION}-x86_64-SHA256SUMS.txt"
+          else
+            shasum -a 256 ./*.zip > "MacSense-${VERSION}-x86_64-SHA256SUMS.txt"
+          fi
+          ls -lh .
+          cat ./*SHA256SUMS.txt
 
       - uses: actions/upload-artifact@v4
         with:
@@ -73,6 +112,9 @@ jobs:
           - Requires macOS 14 or newer.
           - Ad-hoc signed only (no Developer ID, not notarized). After unzipping, clear the
             quarantine flag before launching: \`xattr -dr com.apple.quarantine /Applications/MacSense.app\`
+          - Packaging fix: SwiftPM's \`swift build\` resource-bundle accessor looks for the bundle
+            at the \`.app\` root, so a copy is placed there as well. Without it the app traps in
+            \`Bundle.module\` on first launch.
           - Not affiliated with the upstream author. MIT licensed.
           EOF
           )"
