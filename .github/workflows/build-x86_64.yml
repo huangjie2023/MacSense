@@ -123,21 +123,22 @@ jobs:
         run: |
           VERSION="$(tr -d '[:space:]' < VERSION)"
           TAG="x86_64-v${VERSION}"
-          NOTES="$(cat <<EOF
+          cat > /tmp/notes.md <<EOF
           Unofficial **x86_64 (Intel)** build of MacSense ${VERSION}, compiled from
           [behruzinho/MacSense](https://github.com/behruzinho/MacSense) at commit ${GITHUB_SHA}.
 
           - Requires macOS 14 or newer.
-          - Ad-hoc signed only (no Developer ID, not notarized). After unzipping, clear the
-            quarantine flag before launching: \`xattr -dr com.apple.quarantine /Applications/MacSense.app\`
-          - Packaging fix: SwiftPM's \`swift build\` resource-bundle accessor looks for the bundle
-            at the \`.app\` root, so a copy is placed there as well. Without it the app traps in
-            \`Bundle.module\` on first launch.
+          - Ad-hoc signed only (no Developer ID, not notarized). If macOS reports the app is
+            damaged after unzipping, clear the quarantine flag:
+            xattr -dr com.apple.quarantine /Applications/MacSense.app
+          - Packaging fix: this build resolves the SwiftPM resource bundle itself. The accessor
+            that swift build generates looks in the .app root and then at an absolute build
+            machine path, so a plainly packaged app trapped in Bundle.module on first launch.
           - Not affiliated with the upstream author. MIT licensed.
           EOF
-          )"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" out/* --clobber
+            gh release edit "$TAG" --notes-file /tmp/notes.md
           else
-            gh release create "$TAG" out/* --title "MacSense ${VERSION} (x86_64, unofficial)" --notes "$NOTES"
+            gh release create "$TAG" out/* --title "MacSense ${VERSION} (x86_64, unofficial)" --notes-file /tmp/notes.md
           fi
