@@ -45,10 +45,30 @@ public enum L10n {
         if candidate.hasPrefix("zh") { return "zh-Hans" }
         return ["ru", "en", "es", "de"].first { candidate.hasPrefix($0) } ?? "en"
     }
+    private final class BundleToken {}
+    // Bundle.module comes from SwiftPM's generated accessor. With the native build
+    // system (`swift build`) that accessor resolves Bundle.main.bundleURL/<bundle>,
+    // which is the .app root rather than Contents/Resources, and then falls back to
+    // an absolute path from the build machine — so a packaged app traps as soon as
+    // it is run anywhere else. Resolve the resource bundle ourselves instead, with
+    // the standard app layout first.
+    private static let resourceBundle: Bundle = {
+        let name = "MacSense_MacSenseCore.bundle"
+        let candidates = [
+            Bundle.main.resourceURL,
+            Bundle.main.bundleURL,
+            Bundle(for: BundleToken.self).resourceURL,
+            Bundle(for: BundleToken.self).bundleURL
+        ]
+        for candidate in candidates {
+            if let url = candidate?.appendingPathComponent(name), let bundle = Bundle(url: url) { return bundle }
+        }
+        return Bundle(for: BundleToken.self)
+    }()
     private static let bundles: [String: Bundle] = {
         var result: [String: Bundle] = [:]
         for language in ["ru", "en", "zh-Hans", "es", "de"] {
-            if let url = Bundle.module.url(forResource: language, withExtension: "lproj") ?? Bundle.module.url(forResource: language.lowercased(), withExtension: "lproj"), let bundle = Bundle(url: url) { result[language] = bundle }
+            if let url = resourceBundle.url(forResource: language, withExtension: "lproj") ?? resourceBundle.url(forResource: language.lowercased(), withExtension: "lproj"), let bundle = Bundle(url: url) { result[language] = bundle }
         }
         return result
     }()

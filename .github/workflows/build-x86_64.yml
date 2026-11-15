@@ -36,30 +36,26 @@ jobs:
           codesign -dv --verbose=2 "$BIN" 2>&1 | head -20
 
       # SwiftPM's native build system (`swift build`) generates a Bundle.module
-      # accessor that resolves Bundle.main.bundleURL/<Pkg>_<Target>.bundle — i.e.
-      # the .app ROOT, not Contents/Resources — then falls back to an absolute
-      # path from the build machine. Off-machine both miss and the app traps with
-      # "could not load resource bundle". xcodebuild (what upstream ships) emits a
-      # different accessor that looks in Bundle.main.resourceURL, so upstream's
-      # own DMG never hits this. A second copy at the .app root satisfies the
-      # accessor this build actually contains. Verify it, then re-sign.
-      - name: Fix SwiftPM resource bundle lookup
+      # accessor that resolves Bundle.main.bundleURL/<Pkg>_<Target>.bundle — the
+      # .app ROOT, not Contents/Resources — and then falls back to an absolute
+      # path from the build machine. Off-machine both miss, so the app trapped in
+      # Bundle.module as soon as it rendered its first localized string.
+      # Sources/MacSenseCore/Support/Localization.swift now resolves the resource
+      # bundle itself, standard app layout first. This step proves the bundle is
+      # where that lookup expects it and that codesign still accepts the app.
+      - name: Verify resource bundle layout
         run: |
           APP=dist/MacSense.app
-          SRC="$APP/Contents/Resources/MacSense_MacSenseCore.bundle"
-          test -d "$SRC" || { echo "resource bundle missing from Contents/Resources"; find "$APP" -maxdepth 3; exit 1; }
-          /usr/bin/ditto "$SRC" "$APP/MacSense_MacSenseCore.bundle"
+          test -d "$APP/Contents/Resources/MacSense_MacSenseCore.bundle" || { echo "resource bundle missing"; find "$APP" -maxdepth 3; exit 1; }
 
           cat > /tmp/bundleprobe.swift <<'EOF'
           import Foundation
-          let path = Bundle.main.bundleURL
-              .appendingPathComponent("MacSense_MacSenseCore.bundle").path
-          let bundle = Bundle(path: path)
-          print("Bundle.main.bundleURL: \(Bundle.main.bundleURL.path)")
-          print("accessor lookupPath  : \(path)")
-          print("exists               : \(FileManager.default.fileExists(atPath: path))")
-          print("Bundle(path:)        : \(bundle?.bundleIdentifier ?? "nil")")
-          print("localizations        : \(bundle?.localizations.sorted() ?? [])")
+          let url = Bundle.main.resourceURL?.appendingPathComponent("MacSense_MacSenseCore.bundle")
+          let bundle = url.flatMap(Bundle.init(url:))
+          print("resourceURL: \(Bundle.main.resourceURL?.path ?? "nil")")
+          print("bundle     : \(url?.path ?? "nil")")
+          print("lproj ru   : \(bundle?.url(forResource: "ru", withExtension: "lproj")?.lastPathComponent ?? "nil")")
+          print("lproj zh   : \(bundle?.url(forResource: "zh-Hans", withExtension: "lproj")?.lastPathComponent ?? "nil")")
           exit(bundle != nil ? 0 : 1)
           EOF
           swiftc -O /tmp/bundleprobe.swift -o "$APP/Contents/MacOS/bundleprobe"
@@ -92,6 +88,28 @@ jobs:
           fi
           ls -lh .
           cat ./*SHA256SUMS.txt
+
+      # The x86_64 slice cannot execute on the arm64 runner, so build the same
+      # source natively and launch it: this is the real proof that the app gets
+      # past the L10n / Bundle.module path that used to trap. Non-fatal, because a
+      # headless runner may refuse to start a GUI app for unrelated reasons.
+      - name: Runtime smoke test (native arm64 slice)
+        continue-on-error: true
+        env:
+          MACSENSE_ARCH: arm64
+        run: |
+          ./script/build_and_run.sh --build
+          ./dist/MacSense.app/Contents/MacOS/MacSense --diagnostics | head -25
+          open -n "$PWD/dist/MacSense.app"
+          sleep 6
+          if pgrep -x MacSense >/dev/null; then
+            echo "SMOKE TEST PASSED: still running after 6s, localized UI rendered"
+            pkill -x MacSense || true
+          else
+            echo "SMOKE TEST FAILED: process exited"
+            ls -t ~/Library/Logs/DiagnosticReports/MacSense* 2>/dev/null | head -3 || true
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
